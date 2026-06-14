@@ -1,0 +1,12 @@
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Hive mind scratch (temp last-message files are cleaned up automatically, but just in case)
+hivemind-*.txt

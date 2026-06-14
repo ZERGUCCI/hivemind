@@ -1,0 +1,10 @@
+{
+  "name": "hivemind",
+  "version": "0.1.0",
+  "description": "Fuse Claude Code and Codex into one hive mind: independent dual-model research, role-based authoring (Codex=backend, Claude=frontend), adversarial cross-review, and synthesis. Runs on your Claude + Codex subscriptions, no API keys.",
+  "author": {
+    "name": "Nulumin AI Team",
+    "email": "aiteam@nulumin.org"
+  },
+  "keywords": ["codex", "fusion", "multi-agent", "review", "research", "hive-mind"]
+}
