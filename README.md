@@ -4,10 +4,13 @@ Turn Claude Code into a **synthesis of Claude and Codex**. On non-trivial work, 
 research independently, **adversarially review each other**, and Claude synthesizes the result —
 so you get an answer that's smarter and safer than either model alone.
 
-It's a single lightweight **skill** (packaged as a Claude Code **plugin** for easy team sharing).
-It adds only one line to Claude's context until it actually fires — no context rot, no always-on
-machinery — and it runs entirely on your **Claude Max** and **Codex/ChatGPT** subscriptions.
-**No API keys for either side.**
+It's a single lightweight **skill** you add **per project** — scoped to just the project you want it
+in, so **other projects on your machine are completely unaffected**. It lives in that project's
+`.claude/` but is added to `.git/info/exclude`, so it is **never committed and never changes the
+project's git** — it's a tool *for* Claude Code, not part of your codebase. It adds only one line to
+Claude's context until it actually fires (no context rot), **natively detects your existing
+`codex login`** and spends those credits on its own, and runs entirely on your **Claude Max** and
+**Codex/ChatGPT** subscriptions. **No API keys for either side.**
 
 ## Why this works
 
@@ -67,25 +70,47 @@ pay latency for nothing. Force it anytime with **`/hivemind <task>`**.
 
 ## Install
 
-### Option A — as a plugin (recommended for teams)
+Hivemind is a **tool for Claude Code, not part of your codebase**. You add it **per project**: it's
+scoped to just that project (other projects on your machine are untouched), it lives in the project's
+`.claude/` but is added to `.git/info/exclude` so it is **never committed and never shows up in
+`git status`**, and it **auto-detects your `codex login`** — nothing to configure.
 
-```
-# in Claude Code
-/plugin marketplace add <your-org>/hivemind      # this repo (or a local path)
-/plugin install hivemind@hivemind
-```
+(This is about the *tool's* footprint. When you ask it to do work, Codex still authors real code into
+your project — that's the intended work product, and it goes through your normal git review like any
+other change.)
 
-Teammates run the same two lines and they're in — versioned, no per-machine setup.
-
-### Option B — as a standalone skill
+### One-time setup (per machine)
 
 ```bash
-git clone <your-org>/hivemind && cd hivemind
-./install.sh                 # global: ~/.claude (all projects)
-./install.sh --project .     # or copy into one repo's .claude/ (commit it for the team)
+git clone https://github.com/ZERGUCCI/hivemind ~/Dev/hivemind
 ```
 
-Then restart Claude Code. Verify with `/hivemind` or just ask for something non-trivial.
+### Add it to a project
+
+```bash
+cd /path/to/your/project
+~/Dev/hivemind/install.sh        # installs into ./.claude, git-excluded, THIS project only
+```
+
+Restart Claude Code in that project. It now auto-fires on non-trivial work there — and **only**
+there — or run it on demand with `/hivemind`. Remove it anytime:
+
+```bash
+rm -rf .claude/skills/hivemind .claude/commands/hivemind.md
+```
+
+**Tip:** alias it — `alias hivemind-add='~/Dev/hivemind/install.sh'` — then just run `hivemind-add`
+inside any project you want it in.
+
+### Want it in every project instead?
+
+```bash
+~/Dev/hivemind/install.sh --global    # installs into ~/.claude for ALL projects
+```
+
+Or, equivalently, use the plugin system: `/plugin marketplace add ZERGUCCI/hivemind` then
+`/plugin install hivemind@hivemind`. Both make it global; the per-project install above is the
+isolated default.
 
 ## Tuning
 
@@ -106,7 +131,7 @@ hivemind/
 │   ├── SKILL.md               # the orchestration protocol + auto-trigger
 │   └── scripts/hivemind.mjs   # the Codex engine: one `codex exec` pass, clean output
 ├── commands/hivemind.md       # explicit /hivemind
-└── install.sh                 # standalone (non-plugin) install
+└── install.sh                 # standalone user-level install (no plugin system)
 ```
 
 `hivemind.mjs` runs exactly one `codex exec` pass per call (`research` / `review` / `implement`),

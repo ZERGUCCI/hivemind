@@ -1,51 +1,86 @@
 #!/usr/bin/env bash
-# Install the hive mind as a standalone Claude Code skill (no plugin system needed).
-# For team distribution, prefer the plugin route (see README) — this is the lightweight path.
+# hivemind installer — installs the Claude+Codex hive mind for Claude Code.
 #
-# Usage:
-#   ./install.sh                 # global: ~/.claude (symlink, tracks this repo)
-#   ./install.sh --project DIR   # into DIR/.claude (copy, so you can commit it)
-#   ./install.sh --global --copy # global, but copy instead of symlink
+# Hivemind is a tool FOR Claude Code, not part of your codebase. By default it installs
+# into a SINGLE project:
+#   - scoped to that project only (other projects on this machine are unaffected)
+#   - lives in <project>/.claude/ but is added to .git/info/exclude, so it is NEVER
+#     committed, never shown in `git status`, and never changes the project's git.
 set -euo pipefail
 
+usage() {
+  cat <<'EOF'
+hivemind installer
+
+  install.sh                 install into the CURRENT project only (default)
+  install.sh --project DIR   install into project DIR only
+  install.sh --global        install for ALL projects (~/.claude)
+  install.sh --copy          copy instead of symlink
+  install.sh --help          show this help
+
+A project install lives in <project>/.claude/ and is added to .git/info/exclude, so it is
+never committed and never changes the project's git. Other projects are unaffected.
+Remove it anytime: rm -rf <project>/.claude/skills/hivemind <project>/.claude/commands/hivemind.md
+EOF
+}
+
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MODE="global"
-TARGET_ROOT="$HOME/.claude"
-METHOD=""   # link | copy ; defaults per-mode below
+SCOPE="project"
+TARGET_PROJECT="$PWD"
+METHOD="link"
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --global)  MODE="global"; TARGET_ROOT="$HOME/.claude"; shift ;;
-    --project) MODE="project"; TARGET_ROOT="${2:?--project needs a directory}/.claude"; shift 2 ;;
+    --project) SCOPE="project"; TARGET_PROJECT="${2:?--project needs a directory}"; shift 2 ;;
+    --global)  SCOPE="global"; shift ;;
     --copy)    METHOD="copy"; shift ;;
     --link)    METHOD="link"; shift ;;
-    -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
-    *) echo "Unknown arg: $1" >&2; exit 1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown arg: $1" >&2; usage; exit 1 ;;
   esac
 done
-[ -n "$METHOD" ] || { [ "$MODE" = "global" ] && METHOD="link" || METHOD="copy"; }
 
-echo "Installing hivemind → $TARGET_ROOT  (mode=$MODE, method=$METHOD)"
-mkdir -p "$TARGET_ROOT/skills" "$TARGET_ROOT/commands"
-
-install_one() {  # $1=source path  $2=dest path
+install_one() {  # $1=source  $2=dest
   rm -rf "$2"
+  mkdir -p "$(dirname "$2")"
   if [ "$METHOD" = "link" ]; then ln -s "$1" "$2"; else cp -R "$1" "$2"; fi
 }
-install_one "$SRC/skills/hivemind"      "$TARGET_ROOT/skills/hivemind"
-install_one "$SRC/commands/hivemind.md" "$TARGET_ROOT/commands/hivemind.md"
 
-echo "✓ skill:   $TARGET_ROOT/skills/hivemind"
-echo "✓ command: $TARGET_ROOT/commands/hivemind.md"
+if [ "$SCOPE" = "global" ]; then
+  ROOT="$HOME/.claude"
+  echo "Installing hivemind for ALL projects → $ROOT  (method=$METHOD)"
+else
+  [ -d "$TARGET_PROJECT" ] || { echo "No such directory: $TARGET_PROJECT" >&2; exit 1; }
+  ROOT="$(cd "$TARGET_PROJECT" && pwd)/.claude"
+  echo "Installing hivemind into THIS project only → $ROOT  (method=$METHOD)"
+fi
 
-# Preflight: Codex must be installed and logged in (subscription), and node present.
+install_one "$SRC/skills/hivemind"      "$ROOT/skills/hivemind"
+install_one "$SRC/commands/hivemind.md" "$ROOT/commands/hivemind.md"
+echo "✓ skill:   $ROOT/skills/hivemind"
+echo "✓ command: $ROOT/commands/hivemind.md"
+
+# Project install: make it invisible to the project's git so it is never committed.
+if [ "$SCOPE" = "project" ]; then
+  if GITDIR="$(git -C "$TARGET_PROJECT" rev-parse --absolute-git-dir 2>/dev/null)"; then
+    EXCL="$GITDIR/info/exclude"
+    mkdir -p "$(dirname "$EXCL")"; touch "$EXCL"
+    for entry in ".claude/skills/hivemind" ".claude/commands/hivemind.md"; do
+      grep -qxF "$entry" "$EXCL" 2>/dev/null || printf '%s\n' "$entry" >> "$EXCL"
+    done
+    echo "✓ git:     added to $EXCL — never committed, never shown in 'git status'"
+  else
+    echo "ℹ git:     '$TARGET_PROJECT' is not a git repo; nothing to exclude"
+  fi
+fi
+
 echo
 command -v node  >/dev/null 2>&1 && echo "✓ node:  $(node --version)"  || echo "✗ node not found — required to run the helper."
 if command -v codex >/dev/null 2>&1; then
   echo "✓ codex: $(codex --version 2>/dev/null || echo present)"
-  if [ -f "$HOME/.codex/auth.json" ]; then echo "✓ codex auth present (~/.codex/auth.json)"; else echo "✗ not logged in — run 'codex login' (use your subscription, not an API key)."; fi
+  [ -f "$HOME/.codex/auth.json" ] && echo "✓ codex auth present — credits used automatically" || echo "✗ not logged in — run 'codex login' (subscription, not an API key)."
 else
   echo "✗ codex CLI not found — install it and run 'codex login'."
 fi
 echo
-echo "Done. Restart Claude Code (or /reload) so it picks up the skill."
+echo "Done. Restart Claude Code (or start a new session) in this project so it picks up the skill."

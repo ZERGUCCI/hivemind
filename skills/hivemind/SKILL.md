@@ -50,9 +50,9 @@ installed as a plugin or a standalone skill), and pass the payload over a heredo
 
 ```bash
 for c in \
-  "${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/skills/hivemind/scripts/hivemind.mjs}" \
   "${CLAUDE_PROJECT_DIR:+$CLAUDE_PROJECT_DIR/.claude/skills/hivemind/scripts/hivemind.mjs}" \
   "$PWD/.claude/skills/hivemind/scripts/hivemind.mjs" \
+  "${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/skills/hivemind/scripts/hivemind.mjs}" \
   "$HOME/.claude/skills/hivemind/scripts/hivemind.mjs"; do
   [ -n "$c" ] && [ -f "$c" ] && HM="$c" && break
 done
@@ -60,8 +60,10 @@ node "$HM" <research|review|implement> --effort high --cd "$PWD" <<'PROMPT'
 <payload>
 PROMPT
 ```
-This finds the helper whether it's installed as a plugin, committed into a project's
-`.claude/skills/`, or installed globally — in that order.
+This finds the helper wherever hivemind is installed — project-local
+(`<project>/.claude/skills/hivemind`, the default), or a user-level plugin/global install.
+Hivemind's own files are git-excluded and never tracked by the project; `--cd "$PWD"` is
+only Codex's working directory for the task it performs — that's where the real work lands.
 
 Each run prints a status line then the result:
 - `===HIVEMIND mode=... status=ok ...===` followed by Codex's message — use it.
