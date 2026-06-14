@@ -49,11 +49,19 @@ All Codex calls go through one script. Resolve its path once per Bash call (work
 installed as a plugin or a standalone skill), and pass the payload over a heredoc on stdin:
 
 ```bash
-HM="${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/skills/hivemind/scripts/hivemind.mjs}"; [ -f "$HM" ] || HM="$HOME/.claude/skills/hivemind/scripts/hivemind.mjs"
+for c in \
+  "${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/skills/hivemind/scripts/hivemind.mjs}" \
+  "${CLAUDE_PROJECT_DIR:+$CLAUDE_PROJECT_DIR/.claude/skills/hivemind/scripts/hivemind.mjs}" \
+  "$PWD/.claude/skills/hivemind/scripts/hivemind.mjs" \
+  "$HOME/.claude/skills/hivemind/scripts/hivemind.mjs"; do
+  [ -n "$c" ] && [ -f "$c" ] && HM="$c" && break
+done
 node "$HM" <research|review|implement> --effort high --cd "$PWD" <<'PROMPT'
 <payload>
 PROMPT
 ```
+This finds the helper whether it's installed as a plugin, committed into a project's
+`.claude/skills/`, or installed globally — in that order.
 
 Each run prints a status line then the result:
 - `===HIVEMIND mode=... status=ok ...===` followed by Codex's message — use it.
