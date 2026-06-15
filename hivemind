@@ -29,6 +29,7 @@ usage() {
 hivemind — manage the Claude + Codex hive mind across your projects
 
   hivemind add [--project DIR] [--global] [--link] [--no-note]   install (default: current project)
+  hivemind run <research|review|implement> [opts]    run the Codex helper (findable from any dir)
   hivemind update [--project DIR | --here]           pull latest, re-sync installs + note
   hivemind remove [--project DIR] [--global]         uninstall from a project
   hivemind status                                    show versions + where it's installed
@@ -215,9 +216,14 @@ cmd_status() {
   return 0
 }
 
+# Run the Codex helper from THIS repo, forwarding args + stdin. Always findable (no cwd/path
+# resolution), so it can't fail the way the in-skill resolver can from a subdirectory/submodule.
+cmd_run() { exec node "$SRC/skills/hivemind/scripts/hivemind.mjs" "$@"; }
+
 cmd="${1:-help}"; shift || true
 case "$cmd" in
   add|install)      cmd_add "$@";;
+  run)              cmd_run "$@";;
   update|upgrade)   cmd_update "$@";;
   remove|uninstall) cmd_remove "$@";;
   status)           cmd_status "$@";;

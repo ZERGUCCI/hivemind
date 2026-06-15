@@ -48,22 +48,31 @@ Claude is always the **orchestrator + synthesizer** (the highest-leverage role).
 All Codex calls go through one script. Resolve its path once per Bash call (works whether
 installed as a plugin or a standalone skill), and pass the payload over a heredoc on stdin:
 
+**Preferred — use the `hivemind` CLI** (standard setup; it finds itself from any directory, so it
+works even when your cwd is a subdirectory or submodule):
 ```bash
-for c in \
-  "${CLAUDE_PROJECT_DIR:+$CLAUDE_PROJECT_DIR/.claude/skills/hivemind/scripts/hivemind.mjs}" \
-  "$PWD/.claude/skills/hivemind/scripts/hivemind.mjs" \
-  "${CLAUDE_PLUGIN_ROOT:+$CLAUDE_PLUGIN_ROOT/skills/hivemind/scripts/hivemind.mjs}" \
-  "$HOME/.claude/skills/hivemind/scripts/hivemind.mjs"; do
-  [ -n "$c" ] && [ -f "$c" ] && HM="$c" && break
-done
+hivemind run <research|review|implement> --effort high --cd "$PWD" --progress /tmp/hm-<role>.json <<'PROMPT'
+<payload>
+PROMPT
+```
+
+**Fallback** — if `command -v hivemind` is empty (plugin-only or server install), resolve the script
+robustly: walk UP from the cwd (so a subdirectory/submodule still finds the project-root install),
+then plugin, then global, and **error instead of running an empty path**:
+```bash
+HM=""; d="${CLAUDE_PROJECT_DIR:-$PWD}"
+while [ -n "$d" ] && [ "$d" != "/" ]; do [ -f "$d/.claude/skills/hivemind/scripts/hivemind.mjs" ] && { HM="$d/.claude/skills/hivemind/scripts/hivemind.mjs"; break; }; d="$(dirname "$d")"; done
+[ -z "$HM" ] && [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "$CLAUDE_PLUGIN_ROOT/skills/hivemind/scripts/hivemind.mjs" ] && HM="$CLAUDE_PLUGIN_ROOT/skills/hivemind/scripts/hivemind.mjs"
+[ -z "$HM" ] && [ -f "$HOME/.claude/skills/hivemind/scripts/hivemind.mjs" ] && HM="$HOME/.claude/skills/hivemind/scripts/hivemind.mjs"
+[ -f "$HM" ] || { echo "hivemind helper not found here — proceed solo (or run 'hivemind add')"; exit 1; }
 node "$HM" <research|review|implement> --effort high --cd "$PWD" --progress /tmp/hm-<role>.json <<'PROMPT'
 <payload>
 PROMPT
 ```
-This finds the helper wherever hivemind is installed — project-local
-(`<project>/.claude/skills/hivemind`, the default), or a user-level plugin/global install.
-Hivemind's own files are git-excluded and never tracked by the project; `--cd "$PWD"` is
-only Codex's working directory for the task it performs — that's where the real work lands.
+Each Bash call is a fresh shell, so run the resolver in the SAME call as the invocation (don't rely
+on `$HM` persisting). Hivemind's own files are git-excluded and never tracked by the project;
+`--cd "$PWD"` is only Codex's working directory for the task — point it at the repo root, not a
+random submodule cwd, if the work spans the whole project.
 
 Each run prints its progress-file path, then a status line, then the result:
 - First line: `===HIVEMIND mode=... status=starting progress=<file>===` — note the `<file>`.
@@ -101,7 +110,7 @@ big tasks. Add `--save <file>` for large outputs and read the file selectively.
    - Backend → launch `implement` **in the background** (`Bash` with `run_in_background: true`),
      then poll its heartbeat (see Liveness) rather than assuming it hung:
      ```bash
-     node "$HM" implement --effort high --cd "$PWD" --progress /tmp/hm-backend.json <<'PROMPT'
+     hivemind run implement --effort high --cd "$PWD" --progress /tmp/hm-backend.json <<'PROMPT'
      <the backend portion, with concrete context: files, contracts, constraints>
      PROMPT
      ```
@@ -114,7 +123,7 @@ big tasks. Add `--save <file>` for large outputs and read the file selectively.
      data safety, idempotency, races, edge cases.
    - Codex reviews Claude's frontend:
      ```bash
-     node "$HM" review --effort high --cd "$PWD" --progress /tmp/hm-review.json <<'PROMPT'
+     hivemind run review --effort high --cd "$PWD" --progress /tmp/hm-review.json <<'PROMPT'
      TASK: <task>
 
      CLAUDE'S WORK TO REVIEW:
