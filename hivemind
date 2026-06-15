@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+# hivemind — manage the Claude + Codex hive mind across your projects.
+#
+#   hivemind add [--project DIR] [--global] [--link]   install (default: current project)
+#   hivemind update [--project DIR | --here]           pull latest, re-sync installs
+#   hivemind remove [--project DIR] [--global]         uninstall from a project
+#   hivemind status                                    show versions + where it's installed
+#   hivemind list                                      list registered project installs
+#
+# A project install lives in <project>/.claude/ and is git-excluded (never committed); other
+# projects are unaffected. Uses your existing `codex login` (no API key).
+set -euo pipefail
+
+# Resolve repo root through symlinks (bash 3.2 compatible — macOS default).
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"; SOURCE="$(readlink "$SOURCE")"
+  case "$SOURCE" in /*) ;; *) SOURCE="$DIR/$SOURCE";; esac
+done
+SRC="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+REG_DIR="$HOME/.hivemind"
+REG="$REG_DIR/installs"
+
+repo_sha() { git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo "unknown"; }
+
+usage() {
+  cat <<'EOF'
+hivemind — manage the Claude + Codex hive mind across your projects
+
+  hivemind add [--project DIR] [--global] [--link]   install (default: current project)
+  hivemind update [--project DIR | --here]           pull latest, re-sync installs
+  hivemind remove [--project DIR] [--global]         uninstall from a project
+  hivemind status                                    show versions + where it's installed
+  hivemind list                                      list registered project installs
+
+A project install lives in <project>/.claude/ and is git-excluded — never committed, never in
+`git status`, scoped to that one project. `update` pulls this repo and re-syncs every project
+you've added it to. Default install is a copy; --link symlinks to this repo (auto-updates on pull).
+EOF
+}
+
+register()   { mkdir -p "$REG_DIR"; touch "$REG"; grep -qxF "$1" "$REG" 2>/dev/null || printf '%s\n' "$1" >> "$REG"; }
+unregister() { [ -f "$REG" ] || return 0; grep -vxF "$1" "$REG" > "$REG.tmp" 2>/dev/null || true; mv "$REG.tmp" "$REG"; }
+
+install_into() { # $1=.claude root  $2=method(link|copy)
+  local root="$1" method="$2"
+  mkdir -p "$root/skills" "$root/commands"
+  rm -rf "$root/skills/hivemind" "$root/commands/hivemind.md"
+  if [ "$method" = "link" ]; then
+    ln -s "$SRC/skills/hivemind" "$root/skills/hivemind"
+    ln -s "$SRC/commands/hivemind.md" "$root/commands/hivemind.md"
+  else
+    cp -R "$SRC/skills/hivemind" "$root/skills/hivemind"
+    cp "$SRC/commands/hivemind.md" "$root/commands/hivemind.md"
+    printf '%s\n' "$(repo_sha)" > "$root/skills/hivemind/.hivemind-version"
+  fi
+}
+
+git_exclude() { # $1=project dir
+  local gd ex e
+  gd="$(git -C "$1" rev-parse --absolute-git-dir 2>/dev/null)" || return 0
+  ex="$gd/info/exclude"; mkdir -p "$(dirname "$ex")"; touch "$ex"
+  for e in ".claude/skills/hivemind" ".claude/commands/hivemind.md"; do
+    grep -qxF "$e" "$ex" 2>/dev/null || printf '%s\n' "$e" >> "$ex"
+  done
+}
+
+codex_check() {
+  if command -v codex >/dev/null 2>&1; then
+    if [ -f "$HOME/.codex/auth.json" ]; then echo "✓ codex ready ($(codex --version 2>/dev/null))"
+    else echo "✗ codex installed but not logged in — run 'codex login'"; fi
+  else echo "✗ codex CLI not found — install it and run 'codex login'"; fi
+}
+
+cmd_add() {
+  local scope=project method=copy target="$PWD"
+  while [ $# -gt 0 ]; do case "$1" in
+    --project) target="${2:?--project needs a dir}"; shift 2;;
+    --global)  scope=global; shift;;
+    --link)    method=link; shift;;
+    --copy)    method=copy; shift;;
+    *) echo "add: unknown arg $1" >&2; exit 1;;
+  esac; done
+  if [ "$scope" = global ]; then
+    install_into "$HOME/.claude" "$method"
+    echo "✓ installed hivemind globally → $HOME/.claude (method=$method, $(repo_sha))"
+  else
+    [ -d "$target" ] || { echo "no such dir: $target" >&2; exit 1; }
+    target="$(cd "$target" && pwd)"
+    install_into "$target/.claude" "$method"
+    git_exclude "$target"
+    register "$target"
+    echo "✓ installed hivemind → $target/.claude (method=$method, $(repo_sha)) — git-excluded, this project only"
+  fi
+  codex_check
+  echo "Restart Claude Code so it picks up the skill."
+}
+
+cmd_update() {
+  local one=""
+  while [ $# -gt 0 ]; do case "$1" in
+    --project) one="${2:?--project needs a dir}"; shift 2;;
+    --here)    one="$PWD"; shift;;
+    --all)     shift;;
+    *) echo "update: unknown arg $1" >&2; exit 1;;
+  esac; done
+  local old new; old="$(repo_sha)"
+  echo "Pulling latest hivemind into $SRC …"
+  git -C "$SRC" pull --ff-only || { echo "✗ git pull failed — resolve manually in $SRC"; exit 1; }
+  new="$(repo_sha)"
+  echo "repo: $old → $new"
+  local targets=()
+  if [ -n "$one" ]; then
+    targets+=("$(cd "$one" && pwd)")
+  else
+    if [ -f "$REG" ]; then while IFS= read -r p; do [ -n "$p" ] && targets+=("$p"); done < "$REG"; fi
+    [ -d "$HOME/.claude/skills/hivemind" ] && targets+=("GLOBAL")
+  fi
+  if [ ${#targets[@]} -eq 0 ]; then echo "No installs registered yet. Run 'hivemind add' in a project."; return 0; fi
+  local t
+  for t in "${targets[@]}"; do
+    if [ "$t" = GLOBAL ]; then
+      if [ -L "$HOME/.claude/skills/hivemind" ]; then echo "  global: symlinked (auto-updated)"
+      else install_into "$HOME/.claude" copy; echo "  global: re-synced → $new"; fi
+    elif [ -d "$t" ]; then
+      if [ -L "$t/.claude/skills/hivemind" ]; then echo "  $t: symlinked (auto-updated)"
+      elif [ -d "$t/.claude/skills/hivemind" ]; then install_into "$t/.claude" copy; git_exclude "$t"; echo "  $t: re-synced → $new"
+      else echo "  $t: not installed (skipped; 'hivemind remove --project $t' to forget)"; fi
+    else echo "  $t: directory gone (skipped)"; fi
+  done
+  echo "Done. Restart Claude Code in the updated projects."
+}
+
+cmd_remove() {
+  local scope=project target="$PWD"
+  while [ $# -gt 0 ]; do case "$1" in
+    --project) target="${2:?--project needs a dir}"; shift 2;;
+    --global)  scope=global; shift;;
+    *) echo "remove: unknown arg $1" >&2; exit 1;;
+  esac; done
+  if [ "$scope" = global ]; then
+    rm -rf "$HOME/.claude/skills/hivemind" "$HOME/.claude/commands/hivemind.md"
+    echo "✓ removed global hivemind"
+  else
+    target="$(cd "$target" && pwd)"
+    rm -rf "$target/.claude/skills/hivemind" "$target/.claude/commands/hivemind.md"
+    unregister "$target"
+    echo "✓ removed hivemind from $target (.git/info/exclude entries left in place — harmless)"
+  fi
+}
+
+cmd_status() {
+  echo "hivemind repo:  $SRC @ $(repo_sha)"
+  echo "codex:          $(codex_check)"
+  echo "project installs:"
+  if [ -f "$REG" ] && [ -s "$REG" ]; then
+    local p v
+    while IFS= read -r p; do
+      [ -z "$p" ] && continue
+      if [ -e "$p/.claude/skills/hivemind" ]; then
+        v="$(cat "$p/.claude/skills/hivemind/.hivemind-version" 2>/dev/null || echo link)"
+        echo "  ✓ $p ($v)"
+      else echo "  ✗ $p (missing — 'hivemind remove --project $p' to forget)"; fi
+    done < "$REG"
+  else echo "  (none registered)"; fi
+  [ -d "$HOME/.claude/skills/hivemind" ] && echo "  ✓ GLOBAL ($HOME/.claude)"
+  return 0
+}
+
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+  add|install)      cmd_add "$@";;
+  update|upgrade)   cmd_update "$@";;
+  remove|uninstall) cmd_remove "$@";;
+  status)           cmd_status "$@";;
+  list)             { [ -f "$REG" ] && cat "$REG"; } || echo "(none)";;
+  help|-h|--help)   usage;;
+  *) echo "unknown command: $cmd" >&2; usage; exit 1;;
+esac

@@ -56,7 +56,7 @@ for c in \
   "$HOME/.claude/skills/hivemind/scripts/hivemind.mjs"; do
   [ -n "$c" ] && [ -f "$c" ] && HM="$c" && break
 done
-node "$HM" <research|review|implement> --effort high --cd "$PWD" <<'PROMPT'
+node "$HM" <research|review|implement> --effort high --cd "$PWD" --progress /tmp/hm-<role>.json <<'PROMPT'
 <payload>
 PROMPT
 ```
@@ -65,24 +65,43 @@ This finds the helper wherever hivemind is installed — project-local
 Hivemind's own files are git-excluded and never tracked by the project; `--cd "$PWD"` is
 only Codex's working directory for the task it performs — that's where the real work lands.
 
-Each run prints a status line then the result:
-- `===HIVEMIND mode=... status=ok ...===` followed by Codex's message — use it.
-- `===HIVEMIND ... status=error reason=...===` — Codex was unavailable (not installed /
-  timed out / empty). **Degrade gracefully: proceed solo and tell the user the hive mind
-  fell back to Claude-only and why.** Never block on Codex.
+Each run prints its progress-file path, then a status line, then the result:
+- First line: `===HIVEMIND mode=... status=starting progress=<file>===` — note the `<file>`.
+- Final line: `===HIVEMIND mode=... status=ok tokens=N events=N ...===` then Codex's message — use it.
+- `===HIVEMIND ... status=error reason=...===` — Codex was unavailable (not installed / timed
+  out / empty). **Degrade gracefully: proceed solo and say the hive mind fell back to Claude-only
+  and why.** Never block on Codex.
 
-`--effort` accepts `low|medium|high|xhigh` (default `high`; use `xhigh` for the gnarliest
-backend work). Add `--save <file>` for large outputs and read the file selectively instead
-of pulling it all into context.
+### Liveness — never kill a slow Codex
+A real Codex pass routinely takes **5–10 minutes**. That is NOT a hang. Run Codex calls **in the
+background** (`Bash` with `run_in_background: true`) and judge liveness by the **heartbeat file**,
+never by elapsed time. Poll it:
+```bash
+node -e "const h=require('/tmp/hm-<role>.json');console.log(h.status,h.elapsedSec+'s','events='+h.events,'tokens='+h.tokensTotal,'bytes='+h.stdoutBytes,'idle='+h.sinceLastEventSec+'s')"
+```
+- **Alive & working:** `events` / `stdoutBytes` climb between polls (token usage posts at each
+  `turn.completed`, so it jumps near the end — events/bytes are the live signal).
+- **Alive but thinking:** counters flat but `updatedIso` still refreshes every ~5s (the file is
+  rewritten on a timer). Still alive — keep waiting.
+- **Actually stuck:** only if the file stops refreshing for a long stretch AND the process is gone.
+  Even then the helper self-terminates at `--timeout` and reports `status=error reason=timeout`.
+
+Default poll cadence: every 30–60s. **Do not SIGKILL a background Codex run just because it has
+been running a few minutes — check the heartbeat first.**
+
+`--effort` accepts `low|medium|high|xhigh` (default `high`; use `xhigh` for the gnarliest backend
+work). `--timeout <sec>` raises the hard kill (default 600s research/review, 1200s implement) for
+big tasks. Add `--save <file>` for large outputs and read the file selectively.
 
 ## Protocol
 
 ### A. Code task
 1. **Decompose** the task into backend-facing and frontend-facing parts.
 2. **Author in parallel, by strength:**
-   - Backend → launch `implement` **in the background** (`Bash` with `run_in_background: true`):
+   - Backend → launch `implement` **in the background** (`Bash` with `run_in_background: true`),
+     then poll its heartbeat (see Liveness) rather than assuming it hung:
      ```bash
-     node "$HM" implement --effort high --cd "$PWD" <<'PROMPT'
+     node "$HM" implement --effort high --cd "$PWD" --progress /tmp/hm-backend.json <<'PROMPT'
      <the backend portion, with concrete context: files, contracts, constraints>
      PROMPT
      ```
@@ -95,7 +114,7 @@ of pulling it all into context.
      data safety, idempotency, races, edge cases.
    - Codex reviews Claude's frontend:
      ```bash
-     node "$HM" review --effort high --cd "$PWD" <<'PROMPT'
+     node "$HM" review --effort high --cd "$PWD" --progress /tmp/hm-review.json <<'PROMPT'
      TASK: <task>
 
      CLAUDE'S WORK TO REVIEW:

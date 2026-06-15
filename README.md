@@ -61,6 +61,15 @@ pay latency for nothing. Force it anytime with **`/hivemind <task>`**.
 - Nothing ships on one model's say-so — the cross-review is the point.
 - If Codex is unavailable, it **degrades to Claude-only** and tells you.
 
+## Progress & liveness (no false "it's hung")
+
+A real Codex pass often takes **5–10 minutes** — that's normal, not a hang. Every Codex call writes
+a live **heartbeat file** (`--progress <file>`) with cumulative token usage, event count, stdout
+bytes, and a 5-second tick. Claude polls it to confirm Codex is alive (counters climbing) instead of
+killing a slow-but-working run. If Codex genuinely stalls, the helper self-terminates at its
+`--timeout` and reports cleanly so Claude can fall back to solo. This fixes the failure mode where a
+long Codex run gets mistaken for a hang and killed prematurely.
+
 ## Requirements
 
 - [Claude Code](https://claude.com/claude-code) on your Claude subscription.
@@ -83,32 +92,42 @@ other change.)
 
 ```bash
 git clone https://github.com/ZERGUCCI/hivemind ~/Dev/hivemind
+ln -s ~/Dev/hivemind/hivemind /usr/local/bin/hivemind   # put the CLI on your PATH
+# (or add an alias: alias hivemind='~/Dev/hivemind/hivemind')
 ```
 
 ### Add it to a project
 
 ```bash
 cd /path/to/your/project
-~/Dev/hivemind/install.sh        # installs into ./.claude, git-excluded, THIS project only
+hivemind add          # installs into ./.claude, git-excluded, THIS project only
 ```
 
 Restart Claude Code in that project. It now auto-fires on non-trivial work there — and **only**
-there — or run it on demand with `/hivemind`. Remove it anytime:
+there — or run it on demand with `/hivemind`.
+
+### Update everywhere
 
 ```bash
-rm -rf .claude/skills/hivemind .claude/commands/hivemind.md
+hivemind update       # git-pull the repo, then re-sync every project you've added it to
 ```
 
-**Tip:** alias it — `alias hivemind-add='~/Dev/hivemind/install.sh'` — then just run `hivemind-add`
-inside any project you want it in.
+`hivemind add` records each project, so `update` pulls the latest and refreshes them all at once
+(`hivemind update --here` does just the current project). Other handy commands:
+
+```bash
+hivemind status       # versions + where it's installed
+hivemind remove       # uninstall from the current project
+hivemind add --link   # symlink instead of copy → a plain `git pull` auto-updates it
+```
 
 ### Want it in every project instead?
 
 ```bash
-~/Dev/hivemind/install.sh --global    # installs into ~/.claude for ALL projects
+hivemind add --global   # installs into ~/.claude for ALL projects
 ```
 
-Or, equivalently, use the plugin system: `/plugin marketplace add ZERGUCCI/hivemind` then
+Or use the plugin system: `/plugin marketplace add ZERGUCCI/hivemind` then
 `/plugin install hivemind@hivemind`. Both make it global; the per-project install above is the
 isolated default.
 

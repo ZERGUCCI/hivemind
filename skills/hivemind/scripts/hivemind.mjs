@@ -10,24 +10,33 @@
 //   review     read-only   Codex adversarially reviews work Claude produced.
 //   implement  write       Codex authors backend / backend-facing code in the workspace.
 //
+// LIVE HEARTBEAT (so Claude never assumes a long run is "hung"):
+//   While Codex runs, a JSON progress file is updated continuously with cumulative
+//   token usage, event count, stdout bytes, and a 5s wall-clock tick. Poll it to
+//   confirm Codex is ALIVE and working (counters climbing) before deciding to wait or
+//   give up. Path is printed on the first line as `progress=<file>` and can be set with
+//   --progress <file>. A real Codex research/review pass often takes 5-10 minutes; that
+//   is normal — judge liveness by the heartbeat, not by elapsed time.
+//
 // Payload (the task / question / work-under-review) is read from stdin, e.g.:
-//   node hivemind.mjs research --effort high <<'EOF'
+//   node hivemind.mjs research --effort high --progress /tmp/hm-research.json <<'EOF'
 //   <task>
 //   EOF
 //
 // Output protocol (so Claude can parse the result and degrade gracefully):
-//   ===HIVEMIND mode=<m> status=ok ...===\n<clean message>
+//   ===HIVEMIND mode=<m> status=starting progress=<file>===        (first line)
+//   ===HIVEMIND mode=<m> status=ok tokens=<n> events=<n> ...===\n<clean message>
 //   ===HIVEMIND mode=<m> status=error reason=<why>===\n<diagnostic>
 // The script always exits 0 on a handled error so the skill can proceed solo.
 
 import { spawn } from 'node:child_process';
-import { writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { writeFileSync, readFileSync, rmSync, existsSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const MODES = {
-  research:  { sandbox: 'read-only',      timeout: 600 },
-  review:    { sandbox: 'read-only',      timeout: 600 },
+  research:  { sandbox: 'read-only',       timeout: 600 },
+  review:    { sandbox: 'read-only',       timeout: 600 },
   implement: { sandbox: 'workspace-write', timeout: 1200 },
 };
 
@@ -109,10 +118,15 @@ Options:
   --effort <none|minimal|low|medium|high|xhigh>   reasoning effort (default: high)
   --model  <slug>                                 override model (default: your codex config)
   --cd     <dir>                                  working root for Codex (default: cwd)
-  --timeout <seconds>                             override per-mode timeout
+  --timeout <seconds>                             hard kill after N seconds (per-mode default)
+  --progress <file>                               live heartbeat JSON path (default: /tmp/hivemind-progress-<mode>-<pid>.json)
   --save   <file>                                 also write the clean message to <file>
   --task   <text>                                 inline payload instead of stdin
   --help                                          show this
+
+Heartbeat: while running, --progress file is updated with cumulative tokens, events,
+stdout bytes, and a 5s tick. Poll it to confirm Codex is alive (counters climbing).
+Real runs often take 5-10 min — that is normal; judge by the heartbeat, not elapsed time.
 
 Auth: uses your existing 'codex login' (subscription). No API key.`;
 }
@@ -155,6 +169,9 @@ if (!MODES[mode]) { console.error(`Unknown mode '${mode}'.\n`); console.log(help
 const cfg = MODES[mode];
 const effort = args.effort && args.effort !== true ? String(args.effort) : 'high';
 const timeoutMs = (Number(args.timeout) > 0 ? Number(args.timeout) : cfg.timeout) * 1000;
+const progressFile = (args.progress && args.progress !== true)
+  ? String(args.progress)
+  : join(tmpdir(), `hivemind-progress-${mode}-${process.pid}.json`);
 
 let payload = (args.task && args.task !== true) ? String(args.task) : '';
 const stdinText = await readStdin();
@@ -165,48 +182,130 @@ if (!payload) { status(mode, 'error', { reason: 'no-input' }, 'No task/payload p
 const prompt = FRAMING[mode](payload);
 const outFile = join(tmpdir(), `hivemind-${mode}-${Date.now()}-${Math.floor(Math.random() * 1e6)}.txt`);
 
-const codexArgs = ['exec', '--sandbox', cfg.sandbox, '--skip-git-repo-check', '--color', 'never', '-o', outFile];
+// --- Heartbeat state -------------------------------------------------------
+const startTs = Date.now();
+let events = 0, stdoutBytes = 0;
+let tokIn = 0, tokOut = 0, tokReason = 0, tokCached = 0;
+let lastEventType = 'starting';
+let lastActivity = startTs;
+let lastWrite = 0;
+let finalMessage = '';
+
+function writeHeartbeat(st) {
+  const now = Date.now();
+  const hb = {
+    tool: 'hivemind', mode, status: st, pid: process.pid,
+    startedIso: new Date(startTs).toISOString(),
+    updatedIso: new Date(now).toISOString(),
+    elapsedSec: Math.round((now - startTs) / 1000),
+    sinceLastEventSec: Math.round((now - lastActivity) / 1000),
+    events,
+    stdoutBytes,
+    tokensTotal: tokIn + tokOut + tokReason,
+    tokensInput: tokIn,
+    tokensOutput: tokOut,
+    tokensReasoning: tokReason,
+    tokensCachedInput: tokCached,
+    lastEventType,
+  };
+  try {
+    const tmp = `${progressFile}.tmp`;
+    writeFileSync(tmp, JSON.stringify(hb, null, 2));
+    renameSync(tmp, progressFile);
+    lastWrite = now;
+  } catch { /* heartbeat is best-effort */ }
+}
+function touchHeartbeat() { if (Date.now() - lastWrite >= 600) writeHeartbeat('running'); }
+
+// Announce the progress path immediately, then write the first heartbeat.
+process.stdout.write(`===HIVEMIND mode=${mode} status=starting progress=${progressFile}===\n`);
+writeHeartbeat('starting');
+// Wall-clock tick: proves liveness even while Codex is quietly thinking (no events).
+const ticker = setInterval(() => writeHeartbeat('running'), 5000);
+if (typeof ticker.unref === 'function') ticker.unref();
+
+// --- Spawn Codex -----------------------------------------------------------
+const codexArgs = ['exec', '--json', '--sandbox', cfg.sandbox, '--skip-git-repo-check', '--color', 'never', '-o', outFile];
 if (args.cd && args.cd !== true) codexArgs.push('-C', String(args.cd));
 if (args.model && args.model !== true) codexArgs.push('-m', String(args.model));
 codexArgs.push('-c', `model_reasoning_effort=${effort}`);
 codexArgs.push('-'); // read the prompt from stdin
 
 const bin = process.env.HIVEMIND_CODEX_BIN || 'codex';
-const start = Date.now();
 let stderr = '';
 let timedOut = false;
+let buf = '';
 
 function cleanup() { try { rmSync(outFile, { force: true }); } catch {} }
 
-const child = spawn(bin, codexArgs, { stdio: ['pipe', 'ignore', 'pipe'] });
+function handleLine(line) {
+  if (!line.trim()) return;
+  events++;
+  let o;
+  try { o = JSON.parse(line); } catch { return; }
+  lastEventType = o.type || (o.msg && o.msg.type) || 'event';
+  const u = o.usage || (o.msg && o.msg.usage);
+  if (u && typeof u === 'object') {
+    if (typeof u.input_tokens === 'number') tokIn += u.input_tokens;
+    if (typeof u.output_tokens === 'number') tokOut += u.output_tokens;
+    if (typeof u.reasoning_output_tokens === 'number') tokReason += u.reasoning_output_tokens;
+    if (typeof u.cached_input_tokens === 'number') tokCached += u.cached_input_tokens;
+  }
+  const item = o.item || (o.msg && o.msg.item);
+  if (item && item.type === 'agent_message' && typeof item.text === 'string' && item.text.trim()) {
+    finalMessage = item.text;
+  }
+}
+
+const child = spawn(bin, codexArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
 const killer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeoutMs);
 
+child.stdout.on('data', (d) => {
+  stdoutBytes += d.length;
+  lastActivity = Date.now();
+  buf += d.toString();
+  let idx;
+  while ((idx = buf.indexOf('\n')) >= 0) {
+    handleLine(buf.slice(0, idx));
+    buf = buf.slice(idx + 1);
+  }
+  touchHeartbeat();
+});
 child.stderr.on('data', (d) => { stderr += d.toString(); });
 
 child.on('error', (err) => {
-  clearTimeout(killer);
-  if (err.code === 'ENOENT') status(mode, 'error', { reason: 'codex-not-found' }, `Could not find the '${bin}' CLI on PATH. Install Codex CLI and run 'codex login'.`);
-  else status(mode, 'error', { reason: 'spawn-failed' }, String(err.message || err));
+  clearTimeout(killer); clearInterval(ticker);
+  if (err.code === 'ENOENT') { writeHeartbeat('error'); status(mode, 'error', { reason: 'codex-not-found' }, `Could not find the '${bin}' CLI on PATH. Install Codex CLI and run 'codex login'.`); }
+  else { writeHeartbeat('error'); status(mode, 'error', { reason: 'spawn-failed' }, String(err.message || err)); }
   cleanup();
   process.exit(0);
 });
 
 child.on('close', (code) => {
-  clearTimeout(killer);
-  const elapsed = Math.round((Date.now() - start) / 1000) + 's';
+  clearTimeout(killer); clearInterval(ticker);
+  if (buf.trim()) handleLine(buf);
+  const elapsed = Math.round((Date.now() - startTs) / 1000) + 's';
+  const tokensTotal = tokIn + tokOut + tokReason;
   if (timedOut) {
-    status(mode, 'error', { reason: 'timeout', elapsed }, `Codex exceeded ${timeoutMs / 1000}s and was killed. Proceed solo, or retry with smaller scope / lower --effort.`);
+    writeHeartbeat('timeout');
+    status(mode, 'error', { reason: 'timeout', elapsed, tokens: tokensTotal, events }, `Codex exceeded ${timeoutMs / 1000}s and was killed. Raise --timeout, or retry with smaller scope / lower --effort.`);
     cleanup();
     process.exit(0);
   }
   let msg = '';
   try { if (existsSync(outFile)) msg = readFileSync(outFile, 'utf8').trim(); } catch {}
+  if (!msg) msg = finalMessage.trim();
   cleanup();
   if (!msg) {
-    status(mode, 'error', { reason: code === 0 ? 'empty-output' : `exit-${code}`, elapsed }, tail(stderr, 1500) || 'Codex returned no message.');
+    writeHeartbeat('error');
+    status(mode, 'error', { reason: code === 0 ? 'empty-output' : `exit-${code}`, elapsed, tokens: tokensTotal, events }, tail(stderr, 1500) || 'Codex returned no message.');
     process.exit(0);
   }
-  status(mode, 'ok', { model: (args.model && args.model !== true) ? args.model : 'config-default', effort, sandbox: cfg.sandbox, elapsed });
+  writeHeartbeat('done');
+  status(mode, 'ok', {
+    model: (args.model && args.model !== true) ? args.model : 'config-default',
+    effort, sandbox: cfg.sandbox, elapsed, tokens: tokensTotal, events,
+  });
   process.stdout.write(msg + '\n');
   if (args.save && args.save !== true) { try { writeFileSync(String(args.save), msg); } catch {} }
   process.exit(0);
