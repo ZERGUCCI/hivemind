@@ -28,8 +28,8 @@ usage() {
   cat <<'EOF'
 hivemind — manage the Claude + Codex hive mind across your projects
 
-  hivemind add [--project DIR] [--global] [--link]   install (default: current project)
-  hivemind update [--project DIR | --here]           pull latest, re-sync installs
+  hivemind add [--project DIR] [--global] [--link] [--no-note]   install (default: current project)
+  hivemind update [--project DIR | --here]           pull latest, re-sync installs + note
   hivemind remove [--project DIR] [--global]         uninstall from a project
   hivemind status                                    show versions + where it's installed
   hivemind list                                      list registered project installs
@@ -37,6 +37,10 @@ hivemind — manage the Claude + Codex hive mind across your projects
 A project install lives in <project>/.claude/ and is git-excluded — never committed, never in
 `git status`, scoped to that one project. `update` pulls this repo and re-syncs every project
 you've added it to. Default install is a copy; --link symlinks to this repo (auto-updates on pull).
+
+`add` also writes a small marked note into the project's CLAUDE.md so Claude keeps reaching for the
+hive mind across long sessions (skill descriptions lose salience as a session fills up). The note is
+committed (use --no-note to skip); `remove` strips it.
 EOF
 }
 
@@ -66,6 +70,41 @@ git_exclude() { # $1=project dir
   done
 }
 
+# A persistent instruction in CLAUDE.md keeps Claude reaching for the skill across long sessions
+# (a skill description alone loses salience as a session fills up). Managed as a marked, idempotent
+# block so it can be refreshed on `update` and cleanly removed on `remove`.
+note_block() {
+  cat <<'EOF'
+
+<!-- hivemind:start -->
+## Hive mind (Claude + Codex) — use it, and keep using it
+
+For any non-trivial work in this project, route through the **hivemind** skill instead of working
+solo: a research/design question worth a second opinion, or any code change beyond a trivial
+one-liner. Codex authors backend / backend-facing code, Claude authors frontend, each adversarially
+reviews the other, then Claude synthesizes. **Keep using it across long sessions — do not drift back
+to solo work as the task drags on.** Force it anytime with `/hivemind`. (Auto-managed by the
+`hivemind` CLI: refresh with `hivemind update`, delete with `hivemind remove`.)
+<!-- hivemind:end -->
+EOF
+}
+
+strip_note() { # $1 = CLAUDE.md path — remove the hivemind block + trailing blank lines
+  local md="$1" tmp
+  [ -f "$md" ] || return 0
+  tmp="$(dirname "$md")/.hivemind-note.tmp"
+  awk '/<!-- hivemind:start -->/{s=1} /<!-- hivemind:end -->/{s=0;next} !s{print}' "$md" > "$tmp"
+  awk 'NF{last=NR} {line[NR]=$0} END{for(i=1;i<=last;i++)print line[i]}' "$tmp" > "$tmp.2" && mv "$tmp.2" "$tmp"
+  mv "$tmp" "$md"
+}
+
+write_note() { # $1 = CLAUDE.md path — strip any existing block, then append a fresh one
+  local md="$1"
+  mkdir -p "$(dirname "$md")"; touch "$md"
+  strip_note "$md"
+  note_block >> "$md"
+}
+
 codex_check() {
   if command -v codex >/dev/null 2>&1; then
     if [ -f "$HOME/.codex/auth.json" ]; then echo "✓ codex ready ($(codex --version 2>/dev/null))"
@@ -74,16 +113,18 @@ codex_check() {
 }
 
 cmd_add() {
-  local scope=project method=copy target="$PWD"
+  local scope=project method=copy target="$PWD" note=1
   while [ $# -gt 0 ]; do case "$1" in
     --project) target="${2:?--project needs a dir}"; shift 2;;
     --global)  scope=global; shift;;
     --link)    method=link; shift;;
     --copy)    method=copy; shift;;
+    --no-note) note=0; shift;;
     *) echo "add: unknown arg $1" >&2; exit 1;;
   esac; done
   if [ "$scope" = global ]; then
     install_into "$HOME/.claude" "$method"
+    [ "$note" = 1 ] && { write_note "$HOME/.claude/CLAUDE.md"; echo "✓ persistence note → $HOME/.claude/CLAUDE.md"; }
     echo "✓ installed hivemind globally → $HOME/.claude (method=$method, $(repo_sha))"
   else
     [ -d "$target" ] || { echo "no such dir: $target" >&2; exit 1; }
@@ -91,7 +132,8 @@ cmd_add() {
     install_into "$target/.claude" "$method"
     git_exclude "$target"
     register "$target"
-    echo "✓ installed hivemind → $target/.claude (method=$method, $(repo_sha)) — git-excluded, this project only"
+    [ "$note" = 1 ] && { write_note "$target/CLAUDE.md"; echo "✓ persistence note → $target/CLAUDE.md (committed — keeps Claude using hivemind on long sessions; --no-note to skip)"; }
+    echo "✓ installed hivemind → $target/.claude (method=$method, $(repo_sha)) — skill git-excluded, this project only"
   fi
   codex_check
   echo "Restart Claude Code so it picks up the skill."
@@ -121,13 +163,16 @@ cmd_update() {
   local t
   for t in "${targets[@]}"; do
     if [ "$t" = GLOBAL ]; then
-      if [ -L "$HOME/.claude/skills/hivemind" ]; then echo "  global: symlinked (auto-updated)"
-      else install_into "$HOME/.claude" copy; echo "  global: re-synced → $new"; fi
-    elif [ -d "$t" ]; then
-      if [ -L "$t/.claude/skills/hivemind" ]; then echo "  $t: symlinked (auto-updated)"
-      elif [ -d "$t/.claude/skills/hivemind" ]; then install_into "$t/.claude" copy; git_exclude "$t"; echo "  $t: re-synced → $new"
-      else echo "  $t: not installed (skipped; 'hivemind remove --project $t' to forget)"; fi
-    else echo "  $t: directory gone (skipped)"; fi
+      if [ -e "$HOME/.claude/skills/hivemind" ]; then
+        [ -L "$HOME/.claude/skills/hivemind" ] || install_into "$HOME/.claude" copy
+        write_note "$HOME/.claude/CLAUDE.md"
+        echo "  global: refreshed → $new"
+      fi
+    elif [ -d "$t" ] && [ -e "$t/.claude/skills/hivemind" ]; then
+      [ -L "$t/.claude/skills/hivemind" ] || { install_into "$t/.claude" copy; git_exclude "$t"; }
+      write_note "$t/CLAUDE.md"
+      echo "  $t: refreshed → $new"
+    else echo "  $t: not installed / gone (skipped)"; fi
   done
   echo "Done. Restart Claude Code in the updated projects."
 }
@@ -141,12 +186,14 @@ cmd_remove() {
   esac; done
   if [ "$scope" = global ]; then
     rm -rf "$HOME/.claude/skills/hivemind" "$HOME/.claude/commands/hivemind.md"
-    echo "✓ removed global hivemind"
+    strip_note "$HOME/.claude/CLAUDE.md"
+    echo "✓ removed global hivemind (incl. CLAUDE.md note)"
   else
     target="$(cd "$target" && pwd)"
     rm -rf "$target/.claude/skills/hivemind" "$target/.claude/commands/hivemind.md"
+    strip_note "$target/CLAUDE.md"
     unregister "$target"
-    echo "✓ removed hivemind from $target (.git/info/exclude entries left in place — harmless)"
+    echo "✓ removed hivemind from $target (skill, CLAUDE.md note; .git/info/exclude entries left — harmless)"
   fi
 }
 

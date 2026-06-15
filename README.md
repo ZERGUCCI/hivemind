@@ -61,6 +61,26 @@ pay latency for nothing. Force it anytime with **`/hivemind <task>`**.
 - Nothing ships on one model's say-so — the cross-review is the point.
 - If Codex is unavailable, it **degrades to Claude-only** and tells you.
 
+## Staying engaged on long sessions
+
+A skill is *pull*, not push: its one-line description sits in context and Claude decides when to
+reach for it. Over a long session that fills with task-specific work, that description loses salience
+and Claude can drift back to solo work. To counter this, `hivemind add` writes a small **marked note
+into the project's `CLAUDE.md`** — which Claude Code reloads every session into its stable
+instruction region — telling Claude to keep routing non-trivial work through the hive mind:
+
+```
+<!-- hivemind:start -->
+## Hive mind (Claude + Codex) — use it, and keep using it
+For any non-trivial work in this project, route through the hivemind skill … keep using it across
+long sessions — do not drift back to solo work as the task drags on. …
+<!-- hivemind:end -->
+```
+
+This note **is committed** (it also helps teammates discover the tool); pass `--no-note` to skip it.
+It's idempotent (re-running `add`/`update` never duplicates it) and `hivemind remove` strips it. The
+*skill files* themselves remain git-excluded as before — only this small note touches tracked git.
+
 ## Progress & liveness (no false "it's hung")
 
 A real Codex pass often takes **5–10 minutes** — that's normal, not a hang. Every Codex call writes
